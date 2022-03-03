@@ -3,7 +3,7 @@ function details() {
     return {
         id: "Tdarr_Plugin_BALT_FFmpeg_Dynamic_Scaling_HEVC_MKV",
         Stage: "Pre-processing",
-        Name: "FFmpeg Tiered Rescaling HEVC MKV",
+        Name: "FFmpeg Dynamic Rescaling HEVC MKV",
         Type: "Video",
         Operation: "Transcode",
         Description: `[Contains built-in filter] Transcodes video files into h265 mkv using CPU. 
