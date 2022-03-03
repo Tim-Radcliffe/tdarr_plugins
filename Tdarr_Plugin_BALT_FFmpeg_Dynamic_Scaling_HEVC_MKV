@@ -7,8 +7,9 @@ function details() {
         Type: "Video",
         Operation: "Transcode",
         Description: `[Contains built-in filter] Transcodes video files into h265 mkv using CPU. 
-                      Any container or codec not on the whitelist is remuxed to h265 mkv.
-                      Video above the maximum set resolution will be rescaled smaller and recompressed if bitrate above the max set.`,
+                      Any container or codec not in whitelist is remuxed to h265 mkv.
+                      Video above the max set resolution will be rescaled smaller and recompressed if bitrate above max set.
+                      N.B. Needs mkvpropedit installing on the node to function correctly.`,
         Version: "2.1",
         Link: "",
         Tags: "pre-processing,ffmpeg,h265,video only,",
