@@ -1,0 +1,314 @@
+/* eslint-disable */
+function details() {
+    return {
+        id: "Tdarr_Plugin_BALT_FFmpeg_Dynamic_Scaling_HEVC_MKV",
+        Stage: "Pre-processing",
+        Name: "FFmpeg Tiered Rescaling HEVC MKV",
+        Type: "Video",
+        Operation: "Transcode",
+        Description: `[Contains built-in filter] Transcodes video files into h265 mkv using CPU. 
+                      Any container or codec not on the whitelist is remuxed to h265 mkv.
+                      Video above the maximum set resolution will be rescaled smaller and recompressed if bitrate above the max set.`,
+        Version: "2.1",
+        Link: "",
+        Tags: "pre-processing,ffmpeg,h265,video only,",
+
+        Inputs: [
+            {
+                name: "allowed_containers",
+                tooltip: `
+                            Enter a list of allowed file types/containers, separated by a comma.\\n
+                            All non-matching files will be converted to the first entry in this list.\\n
+                            Default is mkv\\n \\n
+                            Example:\\n
+                            mkv,mp4
+                             `,
+            },
+            {
+                name: "allowed_codecs",
+                tooltip: `
+                            Enter a list of allowed video codecs, separated by a comma.\\n
+                            All videos in non-matching codecs will be converted to hevc\\n
+                            Default is hevc,h264,vp9\\n \\n
+                            Example:\\n
+                            hevc,h264,vp9
+                             `,
+            },
+            {
+                name: "max_width",
+                tooltip: `
+                            Enter the maximum video width. \\n
+                            Default is 3840 (4k UHD)\\n \\n
+                            Example:\\n
+                            3840
+                             `,
+            },
+            {
+                name: "max_bits_per_pixel",
+                tooltip: `
+                            Enter the maximum bits per pixel. \\n
+                                                        This defines the maximum bits allowed per video pixel \\n
+                                                        For reasonable quality low motion video this needs about 0.11 \\n
+                                                        For fast motion (e.g. sport) it needs more data so about 0.2 \\n
+                                                        https://streaminglearningcenter.com/encoding/what_is_data_rate_bits_per_pixel.html \\n
+                            Default is 0.2, higher = larger video files allowed\\n \\n
+							Example:\\n
+							0.11
+                             `,
+            },
+            {
+                name: "crf",
+                tooltip: `
+                            Enter the CRF value (1 - 51). \\n
+                            Higher = more compressed (28 recommended max)\\n
+                            Lower = better quality (22 recommended min)\\n
+                            Default is 28\\n \\n
+                            Example:\\n
+                            28
+                             `,
+            },
+        ],
+    };
+}
+
+var setting = {
+    crf: "28", // Higher is more compressed
+    preset: "medium",
+    codec: "libx265",
+    transcode: 0,
+    copy: 0,
+    scaling: "",
+    max_width: "3840",
+    allowed_containers: "mkv",
+    allowed_codecs: "hevc,h264,vp9",
+    pix_fmt: "yuv420p10le",
+    max_bits_per_pixel: 0.2,
+};
+
+var MediaInfo = {
+    videoHeight: "",
+    videoWidth: "",
+    videoFPS: "",
+    videoBR: "",
+    videoBitDepth: "",
+    overallBR: "",
+}; // var MediaInfo
+
+//default values that will be returned
+var response = {
+    processFile: false,
+    preset: "",
+    container: ".mkv",
+    handBrakeMode: false,
+    FFmpegMode: true,
+    reQueueAfter: false,
+    infoLog: "",
+    updateDB: false,
+};
+
+// Runs mkvpropedit --add-track-statistics on the file.
+function updateTrackStats(file) {
+    if (file.container.toLowerCase() != "mkv")
+    {
+      return 0;
+    };
+    response.infoLog += `☑Running mkvpropedit on ${file._id}.\n`;
+    try {
+        const proc = require("child_process");
+        proc.execFileSync('mkvpropedit', [ '--delete-track-statistics-tags', file._id], 
+                           (error,stdout,stderr) => {
+        		      if (error) throw `mkvpropedit failed: ${error}\n`;
+        		   }
+			 );
+        proc.execFileSync(
+            "mkvpropedit",
+            ["--add-track-statistics-tags", file._id],
+            (error, stdout, stderr) => {
+                if (error) throw `mkvpropedit failed: ${error}\n`;
+            }
+        );
+    } catch (err) {
+        response.infoLog += `mkvpropedit failed: ${err}.\n`;
+        //throw `mkvpropedit failed: ${err}.\n`;
+    } // end try/catch
+    return 0;
+} // end updateTrackStats()
+
+// Runs mediainfo on the file, gets JSON output, finds the first video stream and returns the video bit rate and bit depth.
+function getMediaInfo(file) {
+    var objMedInfo = "";
+    try {
+        const proc = require("child_process");
+        objMedInfo = JSON.parse(proc.execFileSync("mediainfo", [file._id, "--output=JSON"]));
+    } catch (err) {
+        response.infoLog += `Mediainfo failed: ${err}.\n`;
+        throw `Mediainfo failed: ${err}.\n`;
+    } // end try/catch
+
+    var videoIdx = -1;
+    var videoInxFirst = -1;
+
+    for (var i = 0; i < file.ffProbeData.streams.length; i++) {
+        strstreamType = file.ffProbeData.streams[i].codec_type.toLowerCase();
+
+        //Looking For Video
+        // Check if stream is a video.
+        if (videoIdx == -1 && strstreamType == "video") {
+            videoIdx = i;
+            videoInxFirst = i;
+
+            MediaInfo.videoHeight = Number(file.ffProbeData.streams[i].height);
+            MediaInfo.videoWidth = Number(file.ffProbeData.streams[i].width);
+            MediaInfo.videoFPS = Number(objMedInfo.media.track[i + 1].FrameRate);
+            MediaInfo.videoBR = Number(objMedInfo.media.track[i + 1].BitRate);
+            MediaInfo.videoBitDepth = Number(objMedInfo.media.track[i + 1].BitDepth);
+            MediaInfo.videoPixels = MediaInfo.videoHeight * MediaInfo.videoWidth;
+            MediaInfo.videoPixelsPS = MediaInfo.videoPixels * MediaInfo.videoFPS;
+            MediaInfo.videoBitsPerPixel = MediaInfo.videoBR / MediaInfo.videoPixelsPS;
+//		try {
+//			Tags = file.ffProbeData.streams[i].tags;
+//           		MediaInfo.videoBR2 = Number(Tags['BPS-eng']);
+//    		} catch (err) {
+//        		response.infoLog += `Mediainfo failed: ${err}.\n`;
+//        		throw `Mediainfo failed: ${err}.\n`;
+//    		} // end try/catch
+        }
+    }
+    MediaInfo.overallBR = objMedInfo.media.track[0].OverallBitRate;
+
+    return;
+} // end  getMediaInfo()
+
+function plugin(file, librarySettings, inputs, otherArguments) {
+    if (inputs.allowed_containers == null) {
+        response.infoLog += `☒No allowed containers specified, defaulting to ${setting.allowed_containers}\n`;
+        setting.allowed_containers = setting.allowed_containers.split(",");
+    } else {
+        setting.allowed_containers = inputs.allowed_containers.split(",");
+    }
+    response.container = `.${setting.allowed_containers[0]}`;
+
+    if (inputs.allowed_codecs == null) {
+        response.infoLog += `☒No allowed codecs specified, defaulting to ${setting.allowed_codecs}\n`;
+        setting.allowed_codecs = setting.allowed_codecs.split(",");
+    } else {
+        setting.allowed_codecs = inputs.allowed_codecs.split(",");
+    }
+
+    if (inputs.max_width > 0) {
+        setting.max_width = inputs.max_width;
+    } else {
+        response.infoLog += `☒No valid maximum width specified, defaulting to ${setting.max_width}.\n`;
+    }
+
+    if (inputs.crf > 0) {
+        setting.crf = inputs.crf;
+    } else {
+        response.infoLog += `☒No valid CRF selected, defaulting to 28.\n`;
+    }
+
+    if (inputs.max_bits_per_pixel > 0) {
+        setting.max_bits_per_pixel = inputs.max_bits_per_pixel;
+    } else {
+        response.infoLog += `☒No valid maximum bits per pixel specified, defaulting to ${setting.max_bits_per_pixel}.\n`;
+    }
+
+    //check if the file is a video, if not the function will be stopped immediately
+    if (file.fileMedium !== "video") {
+        response.processFile = false;
+        response.infoLog += "☒File is not a video \n";
+        return response;
+    } else {
+        response.infoLog += "☑File is a video \n";
+    }
+
+    if (setting.allowed_containers.indexOf(file.container.toLowerCase()) === -1) {
+        response.infoLog += `☒File is not an approved file type (${file.container})\n`;
+        setting.copy = 1;
+    } else {
+        response.infoLog += `☑File is an approved file type (${file.container})\n`;
+    }
+
+    updateTrackStats(file);
+    getMediaInfo(file);
+
+//    response.infoLog += `MediaInfo BPS: ${MediaInfo.videoBR}\n`;
+//    response.infoLog += `MKVPropEd BPS: ${MediaInfo.videoBR2}\n`;
+
+    if (
+        setting.allowed_codecs.indexOf(file.ffProbeData.streams[0].codec_name.toLowerCase()) === -1
+    ) {
+        response.infoLog += `☒Video Codec	:${file.ffProbeData.streams[0].codec_name.toLowerCase()} - not an approved codec\n`;
+        setting.transcode = 1;
+    } else {
+        response.infoLog += `☑Video Codec	:${file.ffProbeData.streams[0].codec_name.toLowerCase()}\n`;
+    }
+
+    if (MediaInfo.videoWidth > setting.max_width) {
+        response.infoLog += `☒Video Resolution	:${MediaInfo.videoWidth} x ${MediaInfo.videoHeight} - will be rescaled to ${setting.max_width} wide\n`;
+        setting.scaling = `-vf scale=${setting.max_width}:-2`;
+        setting.transcode = 1;
+    } else {
+        response.infoLog += `☑Video Resolution	:${MediaInfo.videoWidth} x ${MediaInfo.videoHeight}\n`;
+    }
+
+    if (isNaN(MediaInfo.videoBitsPerPixel)) {
+//        if (file.container.toLowerCase() === "mkv" && setting.transcode != 1) {
+//            updateTrackStats(file);
+//            getMediaInfo(file);
+//        }
+        if (MediaInfo.videoBitsPerPixel > setting.max_bits_per_pixel) {
+            response.infoLog += `☒Video Bits per Pixel	:${MediaInfo.videoBitsPerPixel} - exceeds max ${setting.max_bits_per_pixel}\n`;
+            setting.transcode = 1;
+        } else {
+            response.infoLog += `☑Video Bits per Pixel	:${MediaInfo.videoBitsPerPixel} - within max ${setting.max_bits_per_pixel}\n`;
+        }
+    } else if (MediaInfo.videoBitsPerPixel > setting.max_bits_per_pixel) {
+        response.infoLog += `☒Video Bits per Pixel	:${MediaInfo.videoBitsPerPixel} - exceeds max ${setting.max_bits_per_pixel}\n`;
+        setting.transcode = 1;
+    } else {
+        response.infoLog += `☑Video Bits per Pixel	:${MediaInfo.videoBitsPerPixel} - within max ${setting.max_bits_per_pixel}\n`;
+    }
+
+    if (MediaInfo.videoBitDepth < 10 && setting.transcode === 1) {
+        response.infoLog += `☒Video Bit Depth	:${MediaInfo.videoBitDepth} - setting 10 bit for better compression\n`;
+    } else {
+        setting.pix_fmt = null;
+        response.infoLog += `☑Video Bit Depth	:${MediaInfo.videoBitDepth}\n`;
+    }
+
+    //check if the file is eligible for transcoding
+    //if true the neccessary response values will be changed
+    if (setting.transcode === 1) {
+        response.preset = `,-map 0:v -map 0:s? -c:s srt -map 0:a -c copy -c:v:0 ${setting.codec} -preset ${setting.preset} -crf ${setting.crf}`;
+
+        if (setting.scaling !== null) {
+            response.preset += " " + setting.scaling;
+        }
+
+        if (setting.pix_fmt !== null) {
+            response.preset += ` -pix_fmt ${setting.pix_fmt}`;
+        }
+
+        response.preset += " -max_muxing_queue_size 9999";
+        response.processFile = true;
+        response.FFmpegMode = true;
+        response.infoLog += `☒Video will be transcoded\n`;
+        response.updateDB = true;
+    } else if (setting.copy === 1) {
+        response.preset =
+            "-fflags +genpts <io> -map 0:v -map 0:s? -c:s srt -map 0:a -c copy -c:v:0 copy -max_muxing_queue_size 9999";
+        response.processFile = true;
+        response.FFmpegMode = true;
+        response.infoLog += `☒Video will be remuxed into ${setting.allowed_containers[0]} container\n`;
+        response.updateDB = true;
+    } else {
+        response.processFile = false;
+        response.infoLog += `☑File does not require processing\n`;
+    }
+
+    return response;
+}
+
+module.exports.details = details;
+module.exports.plugin = plugin;
